@@ -29,6 +29,11 @@ const DEFAULTS = {
   noiseOn: true,
   soundOn: false,
   silencedUntil: null,
+  clockOn: false,          // horloge (heure réelle) visible sur le scope
+  chronoOn: false,         // chrono rendu disponible par la régie
+  chronoRunning: false,
+  chronoStartedAt: null,
+  chronoBase: 0,           // temps accumulé (ms) hors périodes de marche
   limits: { hrLow: 50, hrHigh: 120, spo2Low: 92, sysLow: 90, sysHigh: 160, mapLow: 65, etco2Low: 30, etco2High: 45 },
   connected: false,
   connError: null,
@@ -294,6 +299,25 @@ function ScopeView({ compact = false }) {
   const perfusing = R.perfusing;
   const hr = hrOf(R, s.fc);
 
+  // Transition crossfade entre rythmes : on mémorise l'ancien rythme et on
+  // fond l'ancien tracé vers le nouveau sur TRANS_MS (évite la bascule sèche).
+  const TRANS_MS = 700;
+  const prevKeyRef = useRef(s.rhythmKey);
+  const transRef = useRef({ oldKey: s.rhythmKey, startedAt: 0 });
+  useEffect(() => {
+    if (prevKeyRef.current !== s.rhythmKey) {
+      transRef.current = { oldKey: prevKeyRef.current, startedAt: Date.now() };
+      prevKeyRef.current = s.rhythmKey;
+    }
+  }, [s.rhythmKey]);
+  // Fond une amplitude "nouvelle" avec celle qu'aurait produit l'ancien rythme.
+  const blend = (newAmp, oldAmpFn) => {
+    const el = Date.now() - transRef.current.startedAt;
+    if (el >= TRANS_MS || transRef.current.oldKey === s.rhythmKey) return newAmp;
+    const k = el / TRANS_MS;
+    return oldAmpFn() * (1 - k) + newAmp * k;
+  };
+
   // FC instantanée : consigne + arythmie sinusale respiratoire (déterministe).
   // Le CHIFFRE et le TRACÉ lisent cette même fonction → toujours cohérents.
   const instHr = () => {
@@ -379,10 +403,35 @@ function ScopeView({ compact = false }) {
     return () => audio.stopAlarm();
   }, [s.soundOn, priority, silenced]);
 
-  const ecgSample = (phase, tSec) => { const h = instHr(); return { amp: R.fn(phase, h || 300, tSec), cycle: h ? 60 / h : 0.2 }; };
-  const plethSample = (phase) => { const h = instHr(); return { amp: perfusing ? plethAmplitude(phase, h) * (spo2Live / 98) : 0, cycle: h ? 60 / h : 1 }; };
+  const ecgSample = (phase, tSec) => {
+    const h = instHr();
+    const newAmp = R.fn(phase, h || 300, tSec);
+    const amp = blend(newAmp, () => {
+      const Ro = RHYTHMS[transRef.current.oldKey];
+      const ho = hrOf(Ro, s.fc);
+      return Ro.fn(phase, ho || 300, tSec);
+    });
+    return { amp, cycle: h ? 60 / h : 0.2 };
+  };
+  const plethSample = (phase) => {
+    const h = instHr();
+    const newAmp = perfusing ? plethAmplitude(phase, h) * (spo2Live / 98) : 0;
+    const amp = blend(newAmp, () => {
+      const Ro = RHYTHMS[transRef.current.oldKey];
+      return Ro.perfusing ? plethAmplitude(phase, hrOf(Ro, s.fc) || 60) * (spo2Live / 98) : 0;
+    });
+    return { amp, cycle: h ? 60 / h : 1 };
+  };
   const respNow = () => Math.sin(Date.now() / 1000 * (2 * Math.PI * store.getState().rr / 60));
-  const artSample = (phase) => { const h = instHr(); return { amp: perfusing ? arterialAmplitude(phase, h, respNow()) : 0.02, cycle: h ? 60 / h : 1 }; };
+  const artSample = (phase) => {
+    const h = instHr();
+    const newAmp = perfusing ? arterialAmplitude(phase, h, respNow()) : 0.02;
+    const amp = blend(newAmp, () => {
+      const Ro = RHYTHMS[transRef.current.oldKey];
+      return Ro.perfusing ? arterialAmplitude(phase, hrOf(Ro, s.fc) || 60, respNow()) : 0.02;
+    });
+    return { amp, cycle: h ? 60 / h : 1 };
+  };
   const co2Sample = (phase, tSec) => ({ amp: perfusing ? capnoAmplitude(tSec, s.rr) : 0.02, cycle: 999 });
 
   const numSize = compact ? 30 : 54;
@@ -404,6 +453,14 @@ function ScopeView({ compact = false }) {
   tiles.push({ key: "ctrl", type: "ctrl" });
 
   const fs = (base) => (compact ? base * 0.6 : base);
+
+  // Chrono (dérivé de l'état synchronisé) + horloge.
+  const chronoMs = s.chronoBase + (s.chronoRunning && s.chronoStartedAt ? nowTs - s.chronoStartedAt : 0);
+  const fmtChrono = (ms) => {
+    const t = Math.floor(ms / 1000), m = Math.floor(t / 60), sec = t % 60;
+    return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  };
+  const clockStr = new Date(nowTs).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
   const renderTile = (t) => {
     if (t.type === "pni") {
@@ -444,6 +501,14 @@ function ScopeView({ compact = false }) {
 
   return (
     <div style={{ background: "#000", height: "100%", display: "flex", flexDirection: "column", position: "relative" }}>
+      {(s.clockOn || s.chronoOn) && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: compact ? "2px 8px" : "4px 16px", borderBottom: "1px solid #111", fontVariantNumeric: "tabular-nums" }}>
+          <span style={{ color: s.chronoRunning ? "#00e34a" : "#9ad", fontSize: fs(28), fontWeight: 700 }}>
+            {s.chronoOn ? fmtChrono(chronoMs) : ""}
+          </span>
+          <span style={{ color: "#aaa", fontSize: fs(20) }}>{s.clockOn ? clockStr : ""}</span>
+        </div>
+      )}
       {silenced && (
         <div style={{ position: "absolute", top: 6, right: 8, zIndex: 5, color: "#ffd60a", fontSize: compact ? 11 : 14, border: "1px solid #ffd60a", borderRadius: 4, padding: "2px 8px" }}>🔕 Silence</div>
       )}
@@ -548,6 +613,24 @@ function RegiePanel() {
         <Slider label="SpO₂ bas" value={s.limits.spo2Low} min={80} max={99} color="#ff8" onChange={(v) => set({ limits: { ...s.limits, spo2Low: v } })} />
         <Slider label="PAM bas" value={s.limits.mapLow} min={40} max={90} color="#ff8" onChange={(v) => set({ limits: { ...s.limits, mapLow: v } })} />
       </div>
+
+      <div style={head}>Chrono / Horloge</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        <button onClick={() => set({ clockOn: !s.clockOn })} style={btn(s.clockOn, "#9ad")}>Horloge {s.clockOn ? "ON" : "OFF"}</button>
+        <button onClick={() => set({ chronoOn: !s.chronoOn })} style={btn(s.chronoOn, "#9ad")}>Chrono {s.chronoOn ? "ON" : "OFF"}</button>
+      </div>
+      {s.chronoOn && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          <button
+            onClick={() => s.chronoRunning
+              ? set({ chronoRunning: false, chronoBase: s.chronoBase + (Date.now() - s.chronoStartedAt), chronoStartedAt: null })
+              : set({ chronoRunning: true, chronoStartedAt: Date.now() })}
+            style={btn(s.chronoRunning, "#9ad")}>
+            {s.chronoRunning ? "⏸ Pause" : "▶ Démarrer"}
+          </button>
+          <button onClick={() => set({ chronoBase: 0, chronoRunning: false, chronoStartedAt: null })} style={btn(false, "#9ad")}>↺ Reset</button>
+        </div>
+      )}
 
       <div style={head}>Réglages</div>
       <button onClick={() => set({ noiseOn: !s.noiseOn })} style={btn(s.noiseOn, "#9c9")}>Bruit temporel {s.noiseOn ? "ON" : "OFF"}</button>
