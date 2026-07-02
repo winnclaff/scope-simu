@@ -310,7 +310,7 @@ function ScopeView({ compact = false }) {
   useEffect(() => {
     let t;
     const tick = () => {
-      setSpo2Live((p) => perfRef.current ? (p < spo2TargetRef.current ? Math.min(spo2TargetRef.current, p + 0.6) : spo2TargetRef.current) : Math.max(0, p - 0.9));
+      setSpo2Live((p) => perfRef.current ? (p < spo2TargetRef.current ? Math.min(spo2TargetRef.current, p + 0.6) : spo2TargetRef.current) : Math.max(0, p - 15));
       t = setTimeout(tick, 60);
     };
     tick(); return () => clearTimeout(t);
