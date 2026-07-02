@@ -294,6 +294,15 @@ function ScopeView({ compact = false }) {
   const perfusing = R.perfusing;
   const hr = hrOf(R, s.fc);
 
+  // FC instantanée : consigne + arythmie sinusale respiratoire (déterministe).
+  // Le CHIFFRE et le TRACÉ lisent cette même fonction → toujours cohérents.
+  const instHr = () => {
+    if (R.fixedHr !== null) return R.fixedHr;
+    const st = store.getState();
+    const resp = Math.sin(Date.now() / 1000 * (2 * Math.PI * st.rr / 60));
+    return st.fc + (st.noiseOn ? resp * 1.4 : 0);
+  };
+
   // SpO2 réelle : décroît vers 0 (→ ---) en 2-3 s si non perfusant.
   const [spo2Live, setSpo2Live] = useState(98);
   const perfRef = useRef(perfusing); perfRef.current = perfusing;
@@ -316,7 +325,7 @@ function ScopeView({ compact = false }) {
       const resp = Math.sin(Date.now() / 1000 * (2 * Math.PI * st.rr / 60)); // phase respi
       const n = st.noiseOn ? 1 : 0;
       setDisp({
-        fc: Math.round(st.fc + n * (resp * 1.1 + (Math.random() - 0.5))),
+        fc: Math.round(instHr()),
         spo2: Math.round(spo2Live + n * (Math.random() - 0.5) * 0.8),
         paSys: Math.round(st.paSys + n * resp * 3),
         paDia: Math.round(st.paDia + n * resp * 2),
@@ -333,10 +342,11 @@ function ScopeView({ compact = false }) {
   // PNI : dérivée de nibpRequestedAt (pas de valeur stockée → Supabase-friendly).
   const [nowTs, setNowTs] = useState(Date.now());
   useEffect(() => { const i = setInterval(() => setNowTs(Date.now()), 300); return () => clearInterval(i); }, []);
-  let nibpDisplay = "—/—", nibpMap = "", nibpMeasuring = false;
+  let nibpDisplay = "—/—", nibpMap = "", nibpMeasuring = false, nibpFail = false;
   if (s.nibpRequestedAt) {
     const el = nowTs - s.nibpRequestedAt;
-    if (el < NIBP_DURATION) { nibpMeasuring = true; nibpDisplay = "…"; nibpMap = "mesure"; }
+    if (!perfusing) { nibpFail = true; nibpDisplay = "échec"; nibpMap = "pas de pouls"; }
+    else if (el < NIBP_DURATION) { nibpMeasuring = true; nibpDisplay = "…"; nibpMap = "mesure"; }
     else {
       const sys = Math.round(s.nibpSys + (s.noiseOn ? seeded(s.nibpRequestedAt) * 3 : 0));
       const dia = Math.round(s.nibpDia + (s.noiseOn ? seeded(s.nibpRequestedAt + 1) * 2 : 0));
@@ -369,10 +379,10 @@ function ScopeView({ compact = false }) {
     return () => audio.stopAlarm();
   }, [s.soundOn, priority, silenced]);
 
-  const ecgSample = (phase, tSec) => ({ amp: R.fn(phase, hr || 300, tSec), cycle: hr ? 60 / hr : 0.2 });
-  const plethSample = (phase) => ({ amp: perfusing ? plethAmplitude(phase, hr) * (spo2Live / 98) : 0, cycle: hr ? 60 / hr : 1 });
+  const ecgSample = (phase, tSec) => { const h = instHr(); return { amp: R.fn(phase, h || 300, tSec), cycle: h ? 60 / h : 0.2 }; };
+  const plethSample = (phase) => { const h = instHr(); return { amp: perfusing ? plethAmplitude(phase, h) * (spo2Live / 98) : 0, cycle: h ? 60 / h : 1 }; };
   const respNow = () => Math.sin(Date.now() / 1000 * (2 * Math.PI * store.getState().rr / 60));
-  const artSample = (phase) => ({ amp: perfusing ? arterialAmplitude(phase, hr, respNow()) : 0.02, cycle: hr ? 60 / hr : 1 });
+  const artSample = (phase) => { const h = instHr(); return { amp: perfusing ? arterialAmplitude(phase, h, respNow()) : 0.02, cycle: h ? 60 / h : 1 }; };
   const co2Sample = (phase, tSec) => ({ amp: perfusing ? capnoAmplitude(tSec, s.rr) : 0.02, cycle: 999 });
 
   const numSize = compact ? 30 : 54;
@@ -380,7 +390,7 @@ function ScopeView({ compact = false }) {
 
   // COURBES : une ligne par courbe activée en régie.
   const waveRows = [
-    s.showEcg && { key: "ecg", color: COLORS.ecg, sample: ecgSample, px: compact ? 34 : 52, base: 0.55, label: "II", value: hr || "---", unit: "bpm", sub: R.label, beat: onBeat, alarm: alarms.fc },
+    s.showEcg && { key: "ecg", color: COLORS.ecg, sample: ecgSample, px: compact ? 34 : 52, base: 0.55, label: "II", value: perfusing ? disp.fc : (hr || "---"), unit: "bpm", sub: R.label, beat: onBeat, alarm: alarms.fc },
     s.showPleth && { key: "pleth", color: COLORS.pleth, sample: plethSample, px: compact ? 34 : 50, base: 0.9, label: "Pléth", value: spo2Show, unit: "%", sub: "SpO₂", alarm: alarms.spo2 },
     s.artOn && { key: "art", color: COLORS.art, sample: artSample, px: compact ? 34 : 50, base: 0.9, label: "PA", value: perfusing ? `${disp.paSys}/${disp.paDia}` : "---", unit: "mmHg", sub: perfusing ? `(${pam})` : "", alarm: alarms.pa },
     s.co2On && { key: "co2", color: COLORS.co2, sample: co2Sample, px: compact ? 30 : 45, base: 0.85, label: "CO₂", value: perfusing ? disp.etco2 : 0, unit: "mmHg", sub: `FR ${s.rr}`, alarm: alarms.etco2 },
@@ -388,31 +398,32 @@ function ScopeView({ compact = false }) {
 
   // CASES chiffres : FC et SpO2 en case si leur courbe est OFF ; PNI + contrôles toujours.
   const tiles = [];
-  if (!s.showEcg) tiles.push({ key: "fc", color: COLORS.ecg, label: "FC", value: hr || "---", unit: "bpm", alarm: alarms.fc });
+  if (!s.showEcg) tiles.push({ key: "fc", color: COLORS.ecg, label: "FC", value: perfusing ? disp.fc : (hr || "---"), unit: "bpm", alarm: alarms.fc });
   if (!s.showPleth) tiles.push({ key: "spo2", color: COLORS.pleth, label: "SpO₂", value: spo2Show, unit: "%", alarm: alarms.spo2 });
   tiles.push({ key: "pni", type: "pni" });
   tiles.push({ key: "ctrl", type: "ctrl" });
 
   const fs = (base) => (compact ? base * 0.6 : base);
 
-  const Tile = ({ t }) => {
+  const renderTile = (t) => {
     if (t.type === "pni") {
+      const col = nibpFail ? COLORS.art : nibpMeasuring ? "#ffd60a" : "#fff";
       return (
-        <div style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", padding: 8 }}>
+        <div key={t.key} style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", padding: 8 }}>
           <span style={{ color: "#fff", fontSize: fs(14), opacity: 0.7, alignSelf: "flex-start" }}>PNI</span>
-          <span style={{ color: nibpMeasuring ? "#ffd60a" : "#fff", fontSize: nibpMeasuring ? fs(20) : fs(46), fontWeight: 700, lineHeight: 1.1, fontVariantNumeric: "tabular-nums" }}>
+          <span style={{ color: col, fontSize: nibpMeasuring || nibpFail ? fs(20) : fs(46), fontWeight: 700, lineHeight: 1.1, fontVariantNumeric: "tabular-nums" }}>
             {nibpMeasuring ? "mesure…" : nibpDisplay}
           </span>
-          <span style={{ color: "#fff", fontSize: fs(13), opacity: 0.6 }}>{nibpMap} mmHg</span>
+          <span style={{ color: "#fff", fontSize: fs(13), opacity: 0.6 }}>{nibpMap}{nibpFail ? "" : " mmHg"}</span>
         </div>
       );
     }
     if (t.type === "ctrl") {
       const b = (color, disabled) => ({ padding: compact ? "6px" : "12px", fontSize: fs(14), fontWeight: 700, borderRadius: 8, cursor: disabled ? "default" : "pointer", border: "1px solid " + color, background: "#151515", color, width: "100%", boxSizing: "border-box" });
       return (
-        <div style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "flex", flexDirection: "column", justifyContent: "center", gap: 8, padding: compact ? 6 : 12 }}>
-          <button onClick={() => set({ nibpRequestedAt: Date.now() })} disabled={nibpMeasuring} style={b(nibpMeasuring ? "#555" : "#fff", nibpMeasuring)}>
-            {nibpMeasuring ? "PNI en cours…" : "▶ Démarrer PNI"}
+        <div key={t.key} style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "flex", flexDirection: "column", justifyContent: "center", gap: 8, padding: compact ? 6 : 12 }}>
+          <button onClick={() => set({ nibpRequestedAt: Date.now() })} disabled={nibpMeasuring || !perfusing} style={b(nibpMeasuring || !perfusing ? "#555" : "#fff", nibpMeasuring || !perfusing)}>
+            {!perfusing ? "PNI indisponible" : nibpMeasuring ? "PNI en cours…" : "▶ Démarrer PNI"}
           </button>
           {!silenced ? (
             <button onClick={() => set({ silencedUntil: Date.now() + 120000 })} style={b("#ffd60a")}>🔕 Couper alarme</button>
@@ -423,7 +434,7 @@ function ScopeView({ compact = false }) {
       );
     }
     return (
-      <div style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", padding: 8 }}>
+      <div key={t.key} style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", padding: 8 }}>
         <span style={{ color: t.color, fontSize: fs(15), opacity: 0.85, alignSelf: "flex-start" }}>{t.label}</span>
         <span style={{ ...blinkStyle(t.alarm, t.color), fontSize: fs(compact ? 34 : 64) }}>{t.value}</span>
         <span style={{ color: t.color, fontSize: fs(13), opacity: 0.6 }}>{t.unit}</span>
@@ -458,7 +469,7 @@ function ScopeView({ compact = false }) {
 
       {/* Zone cases : grille 2 colonnes */}
       <div style={{ flex: waveRows.length > 0 ? 1 : 2, display: "grid", gridTemplateColumns: "1fr 1fr", gap: compact ? 6 : 12, padding: compact ? 6 : 12, minHeight: 0 }}>
-        {tiles.map((t) => <Tile key={t.key} t={t} />)}
+        {tiles.map(renderTile)}
       </div>
     </div>
   );
@@ -488,15 +499,16 @@ function RegiePanel() {
   const head = { color: "#888", fontSize: 11, textTransform: "uppercase", letterSpacing: 1, marginTop: 6 };
 
   const nibpBusy = s.nibpRequestedAt && Date.now() - s.nibpRequestedAt < NIBP_DURATION;
+  const nibpBlocked = nibpBusy || !R.perfusing;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", boxSizing: "border-box" }}>
       {/* Barre fixe : action PNI toujours accessible, hors zone scrollable */}
       <div style={{ padding: 12, borderBottom: "1px solid #222", background: "#0d0d0d" }}>
-        <button onClick={() => set({ nibpRequestedAt: Date.now() })} disabled={nibpBusy}
-          style={{ width: "100%", padding: "14px", fontSize: 15, fontWeight: 700, borderRadius: 8, cursor: nibpBusy ? "default" : "pointer",
-            border: "1px solid " + (nibpBusy ? "#555" : "#fff"), background: nibpBusy ? "#222" : "#1a1a1a", color: nibpBusy ? "#888" : "#fff" }}>
-          {nibpBusy ? "PNI — mesure en cours…" : "▶ Déclencher mesure PNI"}
+        <button onClick={() => set({ nibpRequestedAt: Date.now() })} disabled={nibpBlocked}
+          style={{ width: "100%", padding: "14px", fontSize: 15, fontWeight: 700, borderRadius: 8, cursor: nibpBlocked ? "default" : "pointer",
+            border: "1px solid " + (nibpBlocked ? "#555" : "#fff"), background: nibpBlocked ? "#222" : "#1a1a1a", color: nibpBlocked ? "#888" : "#fff" }}>
+          {!R.perfusing ? "PNI indisponible (pas de pouls)" : nibpBusy ? "PNI — mesure en cours…" : "▶ Déclencher mesure PNI"}
         </button>
       </div>
     <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 16, overflowY: "auto", flex: 1, boxSizing: "border-box" }}>
@@ -651,12 +663,14 @@ function PiloteScreen({ code, onExit }) {
 
 function ScopeScreen({ code, onExit }) {
   const [s] = useSession();
+  // Safari interdit l'audio sans geste : au 1er contact n'importe où, on l'active.
+  const enableSound = () => { if (!store.getState().soundOn) { audio.enable(); store.setState({ soundOn: true }); } };
   return (
-    <div style={{ height: "100vh", background: "#000", position: "relative" }}>
+    <div onPointerDown={enableSound} style={{ height: "100vh", background: "#000", position: "relative" }}>
       <div style={{ position: "absolute", top: 4, left: 8, zIndex: 10, display: "flex", gap: 8, alignItems: "center" }}>
         <button onClick={onExit} style={{ background: "rgba(0,0,0,0.5)", border: "1px solid #222", color: "#555", borderRadius: 6, padding: "4px 8px", cursor: "pointer", fontSize: 12 }}>←</button>
         {!s.soundOn && (
-          <button onClick={() => { audio.enable(); store.setState({ soundOn: true }); }} style={{ background: "#123", border: "1px solid #4fc3f7", color: "#4fc3f7", borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: 12 }}>🔊 Activer le son</button>
+          <span style={{ background: "#123", border: "1px solid #4fc3f7", color: "#4fc3f7", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>🔊 Touchez l'écran pour le son</span>
         )}
         <ConnBadge />
       </div>
