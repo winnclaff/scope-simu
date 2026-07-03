@@ -175,11 +175,19 @@ function ecgFlutter(phase, hr, tSec) {
   const saw = ((tSec * 5) % 1) - 0.5; // 5 Hz = 300/min
   return qrst(phase) + 0.24 * saw + (Math.random() - 0.5) * 0.01;
 }
-// BAV complet (3e degré) : oreillettes (P) et ventricules (QRS) dissociés.
+// BAV complet (3e degré) : dissociation totale. Oreillettes (P) régulières et
+// indépendantes ~78/min ; ventricules en échappement LARGE ~40/min. Le PR varie
+// en permanence (les P défilent à travers le tracé), certaines P noyées dans le QRS.
 function ecgBAV3(phase, hr, tSec) {
-  const pPhase = tSec % (60 / 90);  // P à ~90/min
-  const qPhase = tSec % (60 / 40);  // QRS d'échappement à ~40/min
-  return 0.14 * g(pPhase, 0.10, 0.022) + qrst(qPhase) + (Math.random() - 0.5) * 0.01;
+  const pT = 60 / 78;   // P indépendantes
+  const qT = 60 / 40;   // QRS d'échappement (= FC affichée)
+  const pu = tSec % pT;
+  const qu = tSec % qT;
+  const P = 0.14 * g(pu, 0.10, 0.024);
+  // QRS large (échappement ventriculaire) + onde T ample opposée.
+  const QRS = 1.05 * g(qu, 0.10, 0.032) - 0.42 * g(qu, 0.175, 0.030);
+  const T = 0.34 * g(qu, 0.44, 0.075);
+  return P + QRS + T + (Math.random() - 0.5) * 0.01;
 }
 
 // perfusing = génère un pouls ; defFc = FC par défaut à la sélection.
@@ -440,7 +448,7 @@ function ScopeView({ compact = false }) {
         paDia: Math.round(st.paDia + n * resp * 2),
         etco2: Math.round(st.etco2 + n * (Math.random() - 0.5)),
       });
-      t = setTimeout(tick, 500);
+      t = setTimeout(tick, 2000);
     };
     tick(); return () => clearTimeout(t);
   }, [spo2Live]);
@@ -486,9 +494,23 @@ function ScopeView({ compact = false }) {
     return () => audio.stopAlarm();
   }, [s.soundOn, priority, silenced]);
 
-  // Bip QRS (asservi à la SpO2), déclenché à chaque battement de l'ECG.
+  // Bip QRS (asservi à la SpO2), indépendant de l'affichage de la courbe ECG.
   const spo2Ref = useRef(spo2Live); spo2Ref.current = spo2Live;
-  const onBeat = () => { if (s.soundOn && !silenced && perfusing && hr) audio.beep(spo2Ref.current); };
+  useEffect(() => {
+    let timer;
+    const tick = () => {
+      const st = store.getState();
+      const Rr = RHYTHMS[st.rhythmKey];
+      const perf = Rr.perfusing;
+      const h = Rr.fixedHr !== null ? Rr.fixedHr : st.fc;
+      const muted = st.silencedUntil && Date.now() < st.silencedUntil;
+      let next = 300;
+      if (st.soundOn && !muted && perf && h) { audio.beep(spo2Ref.current); next = 60000 / h; }
+      timer = setTimeout(tick, next);
+    };
+    timer = setTimeout(tick, 400);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Cycle : régulier, ou irrégulier (arythmie complète) pour la FA.
   const cycleFor = (h, beat) => {
@@ -531,7 +553,7 @@ function ScopeView({ compact = false }) {
 
   // COURBES : une ligne par courbe activée en régie.
   const waveRows = [
-    s.showEcg && { key: "ecg", color: COLORS.ecg, sample: ecgSample, px: compact ? 34 : 52, base: 0.55, label: "II", value: perfusing ? disp.fc : (hr || "---"), unit: "bpm", sub: R.label, alarm: alarms.fc, beat: onBeat },
+    s.showEcg && { key: "ecg", color: COLORS.ecg, sample: ecgSample, px: compact ? 34 : 52, base: 0.55, label: "II", value: perfusing ? disp.fc : (hr || "---"), unit: "bpm", sub: R.label, alarm: alarms.fc },
     s.showPleth && { key: "pleth", color: COLORS.pleth, sample: plethSample, px: compact ? 34 : 50, base: 0.9, label: "Pléth", value: spo2Show, unit: "%", sub: "SpO₂", alarm: alarms.spo2 },
     s.artOn && { key: "art", color: COLORS.art, sample: artSample, px: compact ? 34 : 50, base: 0.9, label: "PA", value: perfusing ? `${disp.paSys}/${disp.paDia}` : "---", unit: "mmHg", sub: perfusing ? `(${pam})` : "", alarm: alarms.pa },
     s.co2On && { key: "co2", color: COLORS.co2, sample: co2Sample, px: compact ? 30 : 45, base: 0.85, label: "CO₂", value: perfusing ? disp.etco2 : 0, unit: "mmHg", sub: `FR ${s.rr}`, alarm: alarms.etco2 },
@@ -594,7 +616,16 @@ function ScopeView({ compact = false }) {
   };
 
   return (
-    <div style={{ background: "radial-gradient(circle at 50% -10%, #0c0d12, #000 65%)", height: "100%", display: "flex", flexDirection: "column", position: "relative", border: "1px solid #26282e", borderRadius: compact ? 8 : 12, overflow: "hidden", boxSizing: "border-box" }}>
+    <div style={{ height: "100%", boxSizing: "border-box", padding: compact ? 4 : 10, background: "linear-gradient(150deg,#1c1f26,#0d0e12)", borderRadius: compact ? 10 : 18 }}>
+      <div style={{ background: "radial-gradient(circle at 50% -10%, #0c0d12, #000 65%)", height: "100%", display: "flex", flexDirection: "column", position: "relative", border: "1px solid #2c2f37", borderRadius: compact ? 6 : 12, overflow: "hidden", boxSizing: "border-box", boxShadow: "inset 0 0 22px #000" }}>
+      {/* Barre d'en-tête moniteur */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: compact ? "2px 8px" : "4px 14px", background: "linear-gradient(#141821,#0a0c11)", borderBottom: "1px solid #23262e", fontSize: fs(12) }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 6, color: "#8fa3b0" }}>
+          <span style={{ width: fs(8), height: fs(8), borderRadius: "50%", background: "#00e34a", boxShadow: "0 0 6px #00e34a" }} />
+          MONITEUR · Adulte
+        </span>
+        <span style={{ color: "#cfd6dd", letterSpacing: 1, fontWeight: 600 }}>{R.label}</span>
+      </div>
       {(s.clockOn || s.chronoOn) && (
         <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: compact ? 16 : 32, padding: compact ? "2px 8px" : "4px 16px", borderBottom: "1px solid #111", fontVariantNumeric: "tabular-nums" }}>
           {s.chronoOn && (
@@ -622,7 +653,7 @@ function ScopeView({ compact = false }) {
             <div key={row.key} style={{ flex: 1, display: "flex", borderBottom: "1px solid #16181d", borderLeft: `3px solid ${row.color}66`, minHeight: 0 }}>
               <div style={{ flex: 1, position: "relative", minWidth: 0 }}>
                 <span style={{ position: "absolute", top: 3, left: 8, color: row.color, fontSize: compact ? 10 : 13, letterSpacing: 1 }}>{row.label}</span>
-                <Trace color={row.color} sample={row.sample} pxPerUnit={row.px} baselineRatio={row.base} onBeat={row.beat} />
+                <Trace color={row.color} sample={row.sample} pxPerUnit={row.px} baselineRatio={row.base} />
               </div>
               <div style={{ width: compact ? 92 : 175, borderLeft: "1px solid #111", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "flex-end", padding: compact ? "0 8px" : "0 16px" }}>
                 <span style={{ color: row.color, fontSize: compact ? 10 : 13, alignSelf: "flex-start", opacity: 0.85 }}>{row.sub}</span>
@@ -640,6 +671,7 @@ function ScopeView({ compact = false }) {
       </div>
       <div style={{ position: "absolute", bottom: 3, left: 0, right: 0, textAlign: "center", color: "#444", fontSize: compact ? 8 : 11, pointerEvents: "none" }}>
         application créée par @un_homme_en_blancs
+      </div>
       </div>
     </div>
   );
@@ -714,7 +746,7 @@ function RegiePanel() {
       <div style={head}>Rythme</div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
         {Object.entries(RHYTHMS).map(([k, v]) => (
-          <button key={k} onClick={() => set({ rhythmKey: k, fc: v.defFc })} style={btn(s.rhythmKey === k, COLORS.ecg)}>{v.label}</button>
+          <button key={k} onClick={() => set({ rhythmKey: k })} style={btn(s.rhythmKey === k, COLORS.ecg)}>{v.label}</button>
         ))}
       </div>
 
