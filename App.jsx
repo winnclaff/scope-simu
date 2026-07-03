@@ -216,20 +216,41 @@ class MonitorAudio {
     osc.connect(gain).connect(this.ctx.destination);
     osc.start(now); osc.stop(now + 0.1);
   }
+  // Une note de moniteur : fondamentale + harmoniques discrètes, enveloppe douce.
+  _pulse(t0, freq, dur, vol) {
+    const ctx = this.ctx;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(vol, t0 + 0.012);
+    gain.gain.setValueAtTime(vol, t0 + dur - 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    gain.connect(ctx.destination);
+    [[1, 1], [2, 0.35], [3, 0.15]].forEach(([mult, amp]) => {
+      const osc = ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = freq * mult;
+      const g2 = ctx.createGain();
+      g2.gain.value = amp;
+      osc.connect(g2).connect(gain);
+      osc.start(t0); osc.stop(t0 + dur + 0.02);
+    });
+  }
+  // Motif IEC 60601-1-8 : haute = 2 salves de 5 bips ; moyenne = 3 bips.
   startAlarm(priority) {
     if (!this.ctx || this.alarmPriority === priority) return;
     this.stopAlarm(); this.alarmPriority = priority;
-    const freq = priority === "high" ? 960 : 500, period = priority === "high" ? 500 : 900, n = priority === "high" ? 3 : 2;
+    const high = priority === "high";
+    const freq = high ? 988 : 660;      // si (haute) / mi (moyenne)
+    const dur = 0.16, vol = high ? 0.3 : 0.22;
+    const period = high ? 2500 : 5000;  // répétition de la salve (ms)
     const burst = () => {
-      const now = this.ctx.currentTime;
-      for (let i = 0; i < n; i++) {
-        const osc = this.ctx.createOscillator(), gain = this.ctx.createGain(), t0 = now + i * 0.14;
-        osc.frequency.value = freq; osc.type = "square";
-        gain.gain.setValueAtTime(0.0001, t0);
-        gain.gain.exponentialRampToValueAtTime(0.18, t0 + 0.01);
-        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.1);
-        osc.connect(gain).connect(this.ctx.destination);
-        osc.start(t0); osc.stop(t0 + 0.11);
+      const now = this.ctx.currentTime + 0.02;
+      if (high) {
+        // salve de 5, pause, salve de 5
+        const offs = [0, 0.22, 0.44, 0.66, 0.88, 1.35, 1.57, 1.79, 2.01, 2.23];
+        offs.forEach((o) => this._pulse(now + o, freq, dur, vol));
+      } else {
+        [0, 0.22, 0.44].forEach((o) => this._pulse(now + o, freq, dur, vol));
       }
     };
     burst(); this.alarmTimer = setInterval(burst, period);
@@ -510,21 +531,19 @@ function ScopeView({ compact = false }) {
   return (
     <div style={{ background: "#000", height: "100%", display: "flex", flexDirection: "column", position: "relative" }}>
       {(s.clockOn || s.chronoOn) && (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: compact ? "2px 8px" : "4px 16px", borderBottom: "1px solid #111", fontVariantNumeric: "tabular-nums" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {s.chronoOn && (
+        <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: compact ? 16 : 32, padding: compact ? "2px 8px" : "4px 16px", borderBottom: "1px solid #111", fontVariantNumeric: "tabular-nums" }}>
+          {s.chronoOn && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <button onClick={() => s.chronoRunning
                 ? set({ chronoRunning: false, chronoBase: s.chronoBase + (Date.now() - s.chronoStartedAt), chronoStartedAt: null })
                 : set({ chronoRunning: true, chronoStartedAt: Date.now() })}
                 style={{ background: "#151515", border: "1px solid #9ad", color: "#9ad", borderRadius: 10, padding: compact ? "2px 8px" : "4px 12px", cursor: "pointer", fontSize: fs(16), fontWeight: 700 }}>
                 {s.chronoRunning ? "⏸" : "▶"}
               </button>
-            )}
-            <span style={{ color: s.chronoRunning ? "#00e34a" : "#9ad", fontSize: fs(28), fontWeight: 700 }}>
-              {s.chronoOn ? fmtChrono(chronoMs) : ""}
-            </span>
-          </div>
-          <span style={{ color: "#aaa", fontSize: fs(20) }}>{s.clockOn ? clockStr : ""}</span>
+              <span style={{ color: s.chronoRunning ? "#00e34a" : "#9ad", fontSize: fs(28), fontWeight: 700 }}>{fmtChrono(chronoMs)}</span>
+            </div>
+          )}
+          {s.clockOn && <span style={{ color: "#aaa", fontSize: fs(22) }}>{clockStr}</span>}
         </div>
       )}
       {silenced && (
