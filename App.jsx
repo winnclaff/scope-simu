@@ -1,4 +1,14 @@
 import React, { useRef, useEffect, useState, useSyncExternalStore } from "react";
+import { createClient } from "@supabase/supabase-js";
+
+/* ============================================================================
+ * CONFIG SUPABASE
+ * La clé anon est publique par design (protégée par les Row Level Security).
+ * Renseigne ces deux valeurs → l'appli se connecte avec le seul code de session.
+ * ==========================================================================*/
+const SUPABASE_URL = "https://uxtohamzbdcdvtwtdhnx.supabase.co";
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV4dG9oYW16YmRjZHZ0d3RkaG54Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODMwMTUzOTIsImV4cCI6MjA5ODU5MTM5Mn0.nnVyLNNPt2qiMp-DXFQCLTKl7f3o7GtE_XPLo_BBsOc";
+const SUPABASE_READY = SUPABASE_URL && SUPABASE_ANON;
 
 /* ============================================================================
  * STORE DE SESSION — sync/store.js
@@ -70,9 +80,6 @@ function createSessionStore() {
 
   async function connect(url, key, sessionCode, role) {
     code = sessionCode;
-    // Chargement dynamique du client (esm.sh). Bloqué dans l'aperçu artifact,
-    // fonctionne une fois déployé sur Netlify.
-    const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
     sb = createClient(url, key, { realtime: { params: { eventsPerSecond: 20 } } });
     mode = "supabase";
 
@@ -476,17 +483,18 @@ function ScopeView({ compact = false }) {
       );
     }
     if (t.type === "ctrl") {
-      const b = (color, disabled) => ({ padding: compact ? "6px" : "12px", fontSize: fs(14), fontWeight: 700, borderRadius: 8, cursor: disabled ? "default" : "pointer", border: "1px solid " + color, background: "#151515", color, width: "100%", boxSizing: "border-box" });
+      const sq = (color, disabled) => ({ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, minHeight: compact ? 40 : 64, fontSize: fs(13), fontWeight: 700, borderRadius: 14, cursor: disabled ? "default" : "pointer", border: "1px solid " + color, background: "#151515", color, padding: 6, boxSizing: "border-box" });
+      const pniDis = nibpMeasuring || !perfusing;
       return (
-        <div key={t.key} style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "flex", flexDirection: "column", justifyContent: "center", gap: 8, padding: compact ? 6 : 12 }}>
-          <button onClick={() => set({ nibpRequestedAt: Date.now() })} disabled={nibpMeasuring || !perfusing} style={b(nibpMeasuring || !perfusing ? "#555" : "#fff", nibpMeasuring || !perfusing)}>
-            {!perfusing ? "PNI indisponible" : nibpMeasuring ? "PNI en cours…" : "▶ Démarrer PNI"}
+        <div key={t.key} style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: compact ? 6 : 10, padding: compact ? 6 : 12 }}>
+          <button onClick={() => set({ nibpRequestedAt: Date.now() })} disabled={pniDis} style={sq(pniDis ? "#555" : "#fff", pniDis)}>
+            <span style={{ fontSize: fs(20) }}>🩺</span>
+            <span>{!perfusing ? "PNI indispo." : nibpMeasuring ? "en cours…" : "PNI"}</span>
           </button>
-          {!silenced ? (
-            <button onClick={() => set({ silencedUntil: Date.now() + 120000 })} style={b("#ffd60a")}>🔕 Couper alarme</button>
-          ) : (
-            <button onClick={() => set({ silencedUntil: null })} style={b("#ffd60a")}>Réactiver alarme</button>
-          )}
+          <button onClick={() => set({ silencedUntil: silenced ? null : Date.now() + 120000 })} style={sq("#ffd60a")}>
+            <span style={{ fontSize: fs(20) }}>{silenced ? "🔔" : "🔕"}</span>
+            <span>{silenced ? "Réactiver" : "Couper alarme"}</span>
+          </button>
         </div>
       );
     }
@@ -503,9 +511,19 @@ function ScopeView({ compact = false }) {
     <div style={{ background: "#000", height: "100%", display: "flex", flexDirection: "column", position: "relative" }}>
       {(s.clockOn || s.chronoOn) && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: compact ? "2px 8px" : "4px 16px", borderBottom: "1px solid #111", fontVariantNumeric: "tabular-nums" }}>
-          <span style={{ color: s.chronoRunning ? "#00e34a" : "#9ad", fontSize: fs(28), fontWeight: 700 }}>
-            {s.chronoOn ? fmtChrono(chronoMs) : ""}
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {s.chronoOn && (
+              <button onClick={() => s.chronoRunning
+                ? set({ chronoRunning: false, chronoBase: s.chronoBase + (Date.now() - s.chronoStartedAt), chronoStartedAt: null })
+                : set({ chronoRunning: true, chronoStartedAt: Date.now() })}
+                style={{ background: "#151515", border: "1px solid #9ad", color: "#9ad", borderRadius: 10, padding: compact ? "2px 8px" : "4px 12px", cursor: "pointer", fontSize: fs(16), fontWeight: 700 }}>
+                {s.chronoRunning ? "⏸" : "▶"}
+              </button>
+            )}
+            <span style={{ color: s.chronoRunning ? "#00e34a" : "#9ad", fontSize: fs(28), fontWeight: 700 }}>
+              {s.chronoOn ? fmtChrono(chronoMs) : ""}
+            </span>
+          </div>
           <span style={{ color: "#aaa", fontSize: fs(20) }}>{s.clockOn ? clockStr : ""}</span>
         </div>
       )}
@@ -535,6 +553,9 @@ function ScopeView({ compact = false }) {
       {/* Zone cases : grille 2 colonnes */}
       <div style={{ flex: waveRows.length > 0 ? 1 : 2, display: "grid", gridTemplateColumns: "1fr 1fr", gap: compact ? 6 : 12, padding: compact ? 6 : 12, minHeight: 0 }}>
         {tiles.map(renderTile)}
+      </div>
+      <div style={{ position: "absolute", bottom: 3, left: 0, right: 0, textAlign: "center", color: "#444", fontSize: compact ? 8 : 11, pointerEvents: "none" }}>
+        application créée par @un_homme_en_blancs
       </div>
     </div>
   );
@@ -655,48 +676,34 @@ function RegiePanel() {
 
 function Home({ onEnter }) {
   const [code, setCode] = useState("");
-  const [url, setUrl] = useState("");
-  const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
   const enter = async (role) => {
     const c = code || "0000";
     setErr(null);
-    // Sans clés → mode local direct.
-    if (!url || !key) { onEnter(role, c); return; }
-    // Avec clés → connexion Supabase avant d'entrer.
+    if (!SUPABASE_READY) { onEnter(role, c); return; } // fallback local si clés absentes
     setBusy(true);
     try {
-      await store.connect(url.trim(), key.trim(), c, role === "pilote" ? "pilote" : "scope");
+      await store.connect(SUPABASE_URL, SUPABASE_ANON, c, role === "pilote" ? "pilote" : "scope");
       onEnter(role, c);
     } catch (e) {
-      setErr("Connexion impossible (normal dans l'aperçu artifact — bloqué. Fonctionne sur Netlify). " + (e?.message || ""));
+      setErr("Connexion impossible : " + (e?.message || "vérifie ta connexion internet."));
     } finally { setBusy(false); }
   };
 
   const bigBtn = (bg) => ({ padding: "20px 30px", fontSize: 19, borderRadius: 12, border: "none", cursor: busy ? "wait" : "pointer", background: bg, color: "#000", fontWeight: 700, minWidth: 210, opacity: busy ? 0.6 : 1 });
-  const field = { padding: "11px 14px", fontSize: 14, width: 320, borderRadius: 8, border: "1px solid #333", background: "#111", color: "#fff", boxSizing: "border-box" };
+  const field = { padding: "11px 14px", fontSize: 14, borderRadius: 8, border: "1px solid #333", background: "#111", color: "#fff", boxSizing: "border-box" };
 
   return (
-    <div style={{ background: "#0a0a0a", minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 18, fontFamily: "'Helvetica Neue', Arial, sans-serif", color: "#eee", padding: 20 }}>
+    <div style={{ background: "#0a0a0a", minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20, fontFamily: "'Helvetica Neue', Arial, sans-serif", color: "#eee", padding: 20 }}>
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: 30, fontWeight: 800, color: COLORS.ecg, letterSpacing: 2 }}>SCOPE SIMU</div>
         <div style={{ color: "#666", fontSize: 14, marginTop: 4 }}>Simulateur de monitorage — formation</div>
       </div>
 
-      <input value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="Code de session (4 chiffres)" inputMode="numeric"
-        style={{ ...field, fontSize: 20, letterSpacing: 6, textAlign: "center", width: 240 }} />
-
-      {/* Connexion Supabase (optionnelle). Vide = mode local. */}
-      <details style={{ width: 320 }}>
-        <summary style={{ color: "#888", fontSize: 12, cursor: "pointer", marginBottom: 8 }}>Connexion Supabase (sync 2 tablettes)</summary>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="Project URL (https://xxxx.supabase.co)" style={field} />
-          <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="Clé anon (public)" style={field} />
-          <div style={{ color: "#555", fontSize: 11 }}>Les deux tablettes utilisent les mêmes clés + le même code de session.</div>
-        </div>
-      </details>
+      <input value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="Code de session" inputMode="numeric"
+        style={{ ...field, fontSize: 22, letterSpacing: 6, textAlign: "center", width: 240 }} />
 
       <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
         <button style={bigBtn(COLORS.ecg)} disabled={busy} onClick={() => enter("pilote")}>RÉGIE (pilote)</button>
@@ -707,7 +714,7 @@ function Home({ onEnter }) {
       {err && <div style={{ color: "#ff8", fontSize: 12, maxWidth: 420, textAlign: "center" }}>{err}</div>}
 
       <div style={{ color: "#555", fontSize: 12, maxWidth: 440, textAlign: "center", lineHeight: 1.5 }}>
-        v0.5 — sans clés : mode local sur cet appareil. Avec clés : sync temps réel entre tablettes.
+        Régie et scope rejoignent la même session avec le même code.
       </div>
     </div>
   );
@@ -731,7 +738,8 @@ function PiloteScreen({ code, onExit }) {
         <button onClick={onExit} style={{ background: "none", border: "1px solid #333", color: "#aaa", borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}>← Accueil</button>
         <span style={{ color: COLORS.ecg, fontWeight: 700 }}>RÉGIE</span>
         <ConnBadge />
-        <span style={{ marginLeft: "auto", letterSpacing: 3 }}>Session {code}</span>
+        <span style={{ marginLeft: "auto", color: "#444", fontSize: 11 }}>créée par @un_homme_en_blancs</span>
+        <span style={{ letterSpacing: 3 }}>Session {code}</span>
       </div>
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         <div style={{ width: 340, borderRight: "1px solid #222", background: "#0a0a0a" }}><RegiePanel /></div>
@@ -746,17 +754,38 @@ function PiloteScreen({ code, onExit }) {
 
 function ScopeScreen({ code, onExit }) {
   const [s] = useSession();
+  const rootRef = useRef(null);
+  const [isFull, setIsFull] = useState(false);
   // Safari interdit l'audio sans geste : au 1er contact n'importe où, on l'active.
   const enableSound = () => { if (!store.getState().soundOn) { audio.enable(); store.setState({ soundOn: true }); } };
+  const toggleFull = () => {
+    const el = rootRef.current;
+    if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+      (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
+      setIsFull(true);
+    } else {
+      (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+      setIsFull(false);
+    }
+  };
+  useEffect(() => {
+    const onChange = () => setIsFull(!!(document.fullscreenElement || document.webkitFullscreenElement));
+    document.addEventListener("fullscreenchange", onChange);
+    document.addEventListener("webkitfullscreenchange", onChange);
+    return () => { document.removeEventListener("fullscreenchange", onChange); document.removeEventListener("webkitfullscreenchange", onChange); };
+  }, []);
   return (
-    <div onPointerDown={enableSound} style={{ height: "100vh", background: "#000", position: "relative" }}>
+    <div ref={rootRef} onPointerDown={enableSound} style={{ height: "100vh", background: "#000", position: "relative" }}>
       <div style={{ position: "absolute", top: 4, left: 8, zIndex: 10, display: "flex", gap: 8, alignItems: "center" }}>
-        <button onClick={onExit} style={{ background: "rgba(0,0,0,0.5)", border: "1px solid #222", color: "#555", borderRadius: 6, padding: "4px 8px", cursor: "pointer", fontSize: 12 }}>←</button>
+        {!isFull && <button onClick={onExit} style={{ background: "rgba(0,0,0,0.5)", border: "1px solid #222", color: "#555", borderRadius: 6, padding: "4px 8px", cursor: "pointer", fontSize: 12 }}>←</button>}
         {!s.soundOn && (
           <span style={{ background: "#123", border: "1px solid #4fc3f7", color: "#4fc3f7", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>🔊 Touchez l'écran pour le son</span>
         )}
         <ConnBadge />
       </div>
+      <button onClick={toggleFull} style={{ position: "absolute", top: 4, right: 8, zIndex: 10, background: "rgba(0,0,0,0.5)", border: "1px solid #333", color: "#888", borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: 12 }}>
+        {isFull ? "⤢ Quitter plein écran" : "⤢ Plein écran"}
+      </button>
       <ScopeView />
     </div>
   );
