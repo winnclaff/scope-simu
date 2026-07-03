@@ -67,15 +67,19 @@ function createSessionStore() {
 
   async function pull() {
     if (!sb) return;
-    const { data } = await sb.from("sessions").select("state").eq("code", code).single();
-    if (data?.state) applyRemote(data.state);
+    try {
+      const { data } = await sb.from("sessions").select("state").eq("code", code).maybeSingle();
+      if (data?.state) applyRemote(data.state);
+    } catch (e) { /* session pas encore créée : on garde l'état par défaut */ }
   }
 
   async function push() {
     if (mode !== "supabase" || !sb) return;
     const sync = { ...state };
     for (const k of LOCAL_KEYS) delete sync[k];
-    await sb.from("sessions").upsert({ code, state: sync, updated_at: new Date().toISOString() });
+    try {
+      await sb.from("sessions").upsert({ code, state: sync, updated_at: new Date().toISOString() });
+    } catch (e) { /* réseau : le prochain push resynchronisera */ }
   }
 
   async function connect(url, key, sessionCode, role) {
@@ -152,17 +156,68 @@ function ecgFV(phase, hr, tSec) {
 }
 function ecgAsystole(phase, hr, tSec) { return 0.02 * Math.sin(tSec * 0.6) + (Math.random() - 0.5) * 0.015; }
 
+// Complexe QRS-T sans onde P (pour FA, flutter, BAV).
+const QRST = [
+  { mu: 0.090, sig: 0.008, a: -0.10 }, // Q
+  { mu: 0.105, sig: 0.007, a: 1.10 },  // R
+  { mu: 0.125, sig: 0.011, a: -0.28 }, // S
+  { mu: 0.260, sig: 0.038, a: 0.30 },  // T
+];
+const qrst = (phase) => { let v = 0; for (const w of QRST) v += w.a * g(phase, w.mu, w.sig); return v; };
+
+// FA : pas d'onde P, ligne de base ondulante (ondes f), RR irrégulier
+// (l'irrégularité est produite par le cycle variable, cf. flag `irregular`).
+function ecgFA(phase, hr, tSec) {
+  return qrst(phase) + 0.06 * Math.sin(2 * Math.PI * 6 * tSec) + (Math.random() - 0.5) * 0.01;
+}
+// Flutter : ondes F en dents de scie ~300/min + QRS (conduction 2:1 par défaut).
+function ecgFlutter(phase, hr, tSec) {
+  const saw = ((tSec * 5) % 1) - 0.5; // 5 Hz = 300/min
+  return qrst(phase) + 0.24 * saw + (Math.random() - 0.5) * 0.01;
+}
+// BAV complet (3e degré) : oreillettes (P) et ventricules (QRS) dissociés.
+function ecgBAV3(phase, hr, tSec) {
+  const pPhase = tSec % (60 / 90);  // P à ~90/min
+  const qPhase = tSec % (60 / 40);  // QRS d'échappement à ~40/min
+  return 0.14 * g(pPhase, 0.10, 0.022) + qrst(qPhase) + (Math.random() - 0.5) * 0.01;
+}
+
 // perfusing = génère un pouls ; defFc = FC par défaut à la sélection.
 const RHYTHMS = {
   sinus:    { fn: ecgSinus, defFc: 80,  label: "Sinusal", perfusing: true, fixedHr: null },
   tachy:    { fn: ecgSinus, defFc: 140, label: "Tachycardie", perfusing: true, fixedHr: null },
   brady:    { fn: ecgSinus, defFc: 42,  label: "Bradycardie", perfusing: true, fixedHr: null },
+  fa:       { fn: ecgFA,    defFc: 110, label: "Fibrillation atriale", perfusing: true, fixedHr: null, irregular: true },
+  flutter:  { fn: ecgFlutter, defFc: 150, label: "Flutter atrial", perfusing: true, fixedHr: null },
+  bav3:     { fn: ecgBAV3,  defFc: 40,  label: "BAV 3e degré", perfusing: true, fixedHr: 40 },
   tv_pouls: { fn: ecgTV,    defFc: 180, label: "TV (pouls +)", perfusing: true, fixedHr: null },
   tv_sans:  { fn: ecgTV,    defFc: 200, label: "TV (pouls −)", perfusing: false, fixedHr: null },
   fv:       { fn: ecgFV,    defFc: 300, label: "FV", perfusing: false, fixedHr: 300 },
   asystole: { fn: ecgAsystole, defFc: 0, label: "Asystolie", perfusing: false, fixedHr: 0 },
 };
 const hrOf = (R, fc) => (R.fixedHr !== null ? R.fixedHr : fc);
+
+/* ============================================================================
+ * PRESETS DE SCÉNARIOS
+ * Champs pilotables capturés dans un preset. Scénarios cliniques prédéfinis +
+ * presets perso stockés en localStorage (propre à la tablette régie).
+ * ==========================================================================*/
+const SNAP_KEYS = ["rhythmKey", "fc", "spo2", "artOn", "showEcg", "showPleth", "co2On", "paSys", "paDia", "etco2", "rr", "nibpSys", "nibpDia", "limits"];
+const snapshot = (s) => { const o = {}; for (const k of SNAP_KEYS) o[k] = s[k]; return o; };
+
+const BUILTIN_PRESETS = [
+  { name: "Patient stable", state: { rhythmKey: "sinus", fc: 75, spo2: 98, showEcg: true, showPleth: true, co2On: false, artOn: false, paSys: 120, paDia: 70, etco2: 38, rr: 14, nibpSys: 120, nibpDia: 72 } },
+  { name: "Choc septique", state: { rhythmKey: "tachy", fc: 125, spo2: 92, showEcg: true, showPleth: true, co2On: false, artOn: true, paSys: 82, paDia: 44, etco2: 30, rr: 26, nibpSys: 84, nibpDia: 46 } },
+  { name: "Détresse respiratoire", state: { rhythmKey: "tachy", fc: 118, spo2: 84, showEcg: true, showPleth: true, co2On: true, artOn: false, paSys: 138, paDia: 82, etco2: 52, rr: 32, nibpSys: 140, nibpDia: 84 } },
+  { name: "OAP", state: { rhythmKey: "tachy", fc: 120, spo2: 88, showEcg: true, showPleth: true, co2On: false, artOn: false, paSys: 182, paDia: 104, etco2: 34, rr: 28, nibpSys: 184, nibpDia: 106 } },
+  { name: "Bradycardie / BAV", state: { rhythmKey: "bav3", fc: 40, spo2: 95, showEcg: true, showPleth: true, co2On: false, artOn: false, paSys: 98, paDia: 58, etco2: 36, rr: 16, nibpSys: 100, nibpDia: 60 } },
+  { name: "ACR — FV", state: { rhythmKey: "fv", fc: 300, spo2: 98, showEcg: true, showPleth: true, co2On: true, artOn: false, paSys: 120, paDia: 70, etco2: 12, rr: 10, nibpSys: 120, nibpDia: 72 } },
+  { name: "ACR — Asystolie", state: { rhythmKey: "asystole", fc: 0, spo2: 98, showEcg: true, showPleth: true, co2On: true, artOn: false, paSys: 120, paDia: 70, etco2: 8, rr: 8, nibpSys: 120, nibpDia: 72 } },
+];
+
+const PRESET_KEY = "scope_presets";
+const loadPresets = () => { try { return JSON.parse(localStorage.getItem(PRESET_KEY)) || []; } catch { return []; } };
+const savePresets = (arr) => { try { localStorage.setItem(PRESET_KEY, JSON.stringify(arr)); } catch {} };
 
 // Pléthysmographie : montée systolique rapide + onde dicrote nette.
 function plethAmplitude(phase, hr) {
@@ -205,6 +260,7 @@ class MonitorAudio {
     if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
     if (this.ctx.state === "suspended") this.ctx.resume();
   }
+  // Bip QRS : tonalité qui baisse avec la SpO2, comme un vrai moniteur.
   beep(spo2) {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
@@ -273,7 +329,7 @@ function Trace({ color, sample, pxPerUnit, baselineRatio, lineWidth = 1.6, onBea
   useEffect(() => {
     const canvas = canvasRef.current, ctx = canvas.getContext("2d");
     let raf, W = 0, H = 0, baseline = 0;
-    const r = { x: 0, prevX: 0, prevY: 0, phase: 0, tSec: 0, last: 0 };
+    const r = { x: 0, prevX: 0, prevY: 0, phase: 0, tSec: 0, last: 0, beat: 0 };
     function resize() {
       const dpr = window.devicePixelRatio || 1, rect = canvas.getBoundingClientRect();
       W = Math.floor(rect.width); H = Math.floor(rect.height);
@@ -299,12 +355,13 @@ function Trace({ color, sample, pxPerUnit, baselineRatio, lineWidth = 1.6, onBea
         if (cx < 0) continue;
         if (cx >= W) { r.x -= W; cx -= W; r.prevX = cx; r.prevY = baseline; }
         r.phase += step;
-        const val = sampleRef.current(r.phase, r.tSec + i * step);
-        if (r.phase >= val.cycle) { r.phase -= val.cycle; if (beatRef.current) beatRef.current(); }
+        const val = sampleRef.current(r.phase, r.tSec + i * step, r.beat);
+        if (r.phase >= val.cycle) { r.phase -= val.cycle; r.beat++; if (beatRef.current) beatRef.current(); }
         let y = baseline - val.amp * pxPerUnit;
         y = Math.max(2, Math.min(H - 2, y));
+        ctx.shadowBlur = 0;
         ctx.fillStyle = "#000"; ctx.fillRect(cx, 0, 1, H); ctx.fillRect(cx + 1, 0, ERASE_GAP, H);
-        if (cx >= r.prevX) { ctx.beginPath(); ctx.moveTo(r.prevX, r.prevY); ctx.lineTo(cx, y); ctx.stroke(); }
+        if (cx >= r.prevX) { ctx.shadowColor = color; ctx.shadowBlur = 6; ctx.beginPath(); ctx.moveTo(r.prevX, r.prevY); ctx.lineTo(cx, y); ctx.stroke(); }
         r.prevX = cx; r.prevY = y;
       }
       raf = requestAnimationFrame(frame);
@@ -422,43 +479,50 @@ function ScopeView({ compact = false }) {
   const [blink, setBlink] = useState(true);
   useEffect(() => { const i = setInterval(() => setBlink((b) => !b), 400); return () => clearInterval(i); }, []);
 
-  // Son.
-  const spo2Ref = useRef(spo2Live); spo2Ref.current = spo2Live;
-  const onBeat = () => { if (s.soundOn && !silenced && perfusing && hr) audio.beep(spo2Ref.current); };
+  // Son : alarmes uniquement (plus de bip QRS).
   useEffect(() => {
     if (!s.soundOn || silenced) { audio.stopAlarm(); return; }
     if (priority) audio.startAlarm(priority); else audio.stopAlarm();
     return () => audio.stopAlarm();
   }, [s.soundOn, priority, silenced]);
 
-  const ecgSample = (phase, tSec) => {
+  // Bip QRS (asservi à la SpO2), déclenché à chaque battement de l'ECG.
+  const spo2Ref = useRef(spo2Live); spo2Ref.current = spo2Live;
+  const onBeat = () => { if (s.soundOn && !silenced && perfusing && hr) audio.beep(spo2Ref.current); };
+
+  // Cycle : régulier, ou irrégulier (arythmie complète) pour la FA.
+  const cycleFor = (h, beat) => {
+    const base = h ? 60 / h : 0.2;
+    return R.irregular ? base * (1 + 0.4 * seeded(beat)) : base;
+  };
+  const ecgSample = (phase, tSec, beat) => {
     const h = instHr();
-    const newAmp = R.fn(phase, h || 300, tSec);
+    const newAmp = R.fn(phase, h || 300, tSec, beat);
     const amp = blend(newAmp, () => {
       const Ro = RHYTHMS[transRef.current.oldKey];
       const ho = hrOf(Ro, s.fc);
-      return Ro.fn(phase, ho || 300, tSec);
+      return Ro.fn(phase, ho || 300, tSec, beat);
     });
-    return { amp, cycle: h ? 60 / h : 0.2 };
+    return { amp, cycle: cycleFor(h, beat) };
   };
-  const plethSample = (phase) => {
+  const plethSample = (phase, tSec, beat) => {
     const h = instHr();
     const newAmp = perfusing ? plethAmplitude(phase, h) * (spo2Live / 98) : 0;
     const amp = blend(newAmp, () => {
       const Ro = RHYTHMS[transRef.current.oldKey];
       return Ro.perfusing ? plethAmplitude(phase, hrOf(Ro, s.fc) || 60) * (spo2Live / 98) : 0;
     });
-    return { amp, cycle: h ? 60 / h : 1 };
+    return { amp, cycle: cycleFor(h, beat) };
   };
   const respNow = () => Math.sin(Date.now() / 1000 * (2 * Math.PI * store.getState().rr / 60));
-  const artSample = (phase) => {
+  const artSample = (phase, tSec, beat) => {
     const h = instHr();
     const newAmp = perfusing ? arterialAmplitude(phase, h, respNow()) : 0.02;
     const amp = blend(newAmp, () => {
       const Ro = RHYTHMS[transRef.current.oldKey];
       return Ro.perfusing ? arterialAmplitude(phase, hrOf(Ro, s.fc) || 60, respNow()) : 0.02;
     });
-    return { amp, cycle: h ? 60 / h : 1 };
+    return { amp, cycle: cycleFor(h, beat) };
   };
   const co2Sample = (phase, tSec) => ({ amp: perfusing ? capnoAmplitude(tSec, s.rr) : 0.02, cycle: 999 });
 
@@ -467,7 +531,7 @@ function ScopeView({ compact = false }) {
 
   // COURBES : une ligne par courbe activée en régie.
   const waveRows = [
-    s.showEcg && { key: "ecg", color: COLORS.ecg, sample: ecgSample, px: compact ? 34 : 52, base: 0.55, label: "II", value: perfusing ? disp.fc : (hr || "---"), unit: "bpm", sub: R.label, beat: onBeat, alarm: alarms.fc },
+    s.showEcg && { key: "ecg", color: COLORS.ecg, sample: ecgSample, px: compact ? 34 : 52, base: 0.55, label: "II", value: perfusing ? disp.fc : (hr || "---"), unit: "bpm", sub: R.label, alarm: alarms.fc, beat: onBeat },
     s.showPleth && { key: "pleth", color: COLORS.pleth, sample: plethSample, px: compact ? 34 : 50, base: 0.9, label: "Pléth", value: spo2Show, unit: "%", sub: "SpO₂", alarm: alarms.spo2 },
     s.artOn && { key: "art", color: COLORS.art, sample: artSample, px: compact ? 34 : 50, base: 0.9, label: "PA", value: perfusing ? `${disp.paSys}/${disp.paDia}` : "---", unit: "mmHg", sub: perfusing ? `(${pam})` : "", alarm: alarms.pa },
     s.co2On && { key: "co2", color: COLORS.co2, sample: co2Sample, px: compact ? 30 : 45, base: 0.85, label: "CO₂", value: perfusing ? disp.etco2 : 0, unit: "mmHg", sub: `FR ${s.rr}`, alarm: alarms.etco2 },
@@ -491,10 +555,11 @@ function ScopeView({ compact = false }) {
   const clockStr = new Date(nowTs).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
   const renderTile = (t) => {
+    const cardBase = (accent) => ({ background: "linear-gradient(160deg,#0e0f13,#080809)", border: `1px solid ${accent}55`, borderRadius: 12, boxShadow: `inset 0 0 0 1px #ffffff08`, display: "flex", flexDirection: "column", justifyContent: "center", padding: 10 });
     if (t.type === "pni") {
       const col = nibpFail ? COLORS.art : nibpMeasuring ? "#ffd60a" : "#fff";
       return (
-        <div key={t.key} style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", padding: 8 }}>
+        <div key={t.key} style={{ ...cardBase("#888"), alignItems: "center" }}>
           <span style={{ color: "#fff", fontSize: fs(14), opacity: 0.7, alignSelf: "flex-start" }}>PNI</span>
           <span style={{ color: col, fontSize: nibpMeasuring || nibpFail ? fs(20) : fs(46), fontWeight: 700, lineHeight: 1.1, fontVariantNumeric: "tabular-nums" }}>
             {nibpMeasuring ? "mesure…" : nibpDisplay}
@@ -504,32 +569,32 @@ function ScopeView({ compact = false }) {
       );
     }
     if (t.type === "ctrl") {
-      const sq = (color, disabled) => ({ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, minHeight: compact ? 40 : 64, fontSize: fs(13), fontWeight: 700, borderRadius: 14, cursor: disabled ? "default" : "pointer", border: "1px solid " + color, background: "#151515", color, padding: 6, boxSizing: "border-box" });
+      const sq = (color, disabled) => ({ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, minHeight: compact ? 44 : 74, fontSize: fs(12), fontWeight: 700, borderRadius: 16, cursor: disabled ? "default" : "pointer", border: "1px solid " + color + "88", background: "linear-gradient(160deg,#17181c,#101013)", color, padding: 6, boxSizing: "border-box" });
       const pniDis = nibpMeasuring || !perfusing;
       return (
-        <div key={t.key} style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "grid", gridTemplateColumns: "1fr 1fr", gap: compact ? 6 : 10, padding: compact ? 6 : 12 }}>
+        <div key={t.key} style={{ ...cardBase("#333"), display: "grid", gridTemplateColumns: "1fr 1fr", gap: compact ? 6 : 10 }}>
           <button onClick={() => set({ nibpRequestedAt: Date.now() })} disabled={pniDis} style={sq(pniDis ? "#555" : "#fff", pniDis)}>
-            <span style={{ fontSize: fs(20) }}>🩺</span>
-            <span>{!perfusing ? "PNI indispo." : nibpMeasuring ? "en cours…" : "PNI"}</span>
+            <span style={{ fontSize: fs(28) }}>🩺</span>
+            <span>{!perfusing ? "indispo." : nibpMeasuring ? "en cours…" : "PNI"}</span>
           </button>
-          <button onClick={() => set({ silencedUntil: silenced ? null : Date.now() + 120000 })} style={sq("#ffd60a")}>
-            <span style={{ fontSize: fs(20) }}>{silenced ? "🔔" : "🔕"}</span>
-            <span>{silenced ? "Réactiver" : "Couper alarme"}</span>
+          <button onClick={() => set({ silencedUntil: silenced ? null : Date.now() + 120000 })} style={sq(silenced ? "#ffb300" : "#ffd60a")}>
+            <span style={{ fontSize: fs(28) }}>{silenced ? "🔔" : "🔕"}</span>
+            <span>{silenced ? "Réactiver" : "Alarme"}</span>
           </button>
         </div>
       );
     }
     return (
-      <div key={t.key} style={{ background: "#0b0b0b", border: "1px solid #1c1c1c", borderRadius: 8, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", padding: 8 }}>
-        <span style={{ color: t.color, fontSize: fs(15), opacity: 0.85, alignSelf: "flex-start" }}>{t.label}</span>
-        <span style={{ ...blinkStyle(t.alarm, t.color), fontSize: fs(compact ? 34 : 64) }}>{t.value}</span>
+      <div key={t.key} style={{ ...cardBase(t.color), alignItems: "center" }}>
+        <span style={{ color: t.color, fontSize: fs(15), opacity: 0.9, alignSelf: "flex-start" }}>{t.label}</span>
+        <span style={{ ...blinkStyle(t.alarm, t.color), fontSize: fs(compact ? 34 : 66), textShadow: `0 0 12px ${t.color}55` }}>{t.value}</span>
         <span style={{ color: t.color, fontSize: fs(13), opacity: 0.6 }}>{t.unit}</span>
       </div>
     );
   };
 
   return (
-    <div style={{ background: "#000", height: "100%", display: "flex", flexDirection: "column", position: "relative" }}>
+    <div style={{ background: "radial-gradient(circle at 50% -10%, #0c0d12, #000 65%)", height: "100%", display: "flex", flexDirection: "column", position: "relative", border: "1px solid #26282e", borderRadius: compact ? 8 : 12, overflow: "hidden", boxSizing: "border-box" }}>
       {(s.clockOn || s.chronoOn) && (
         <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: compact ? 16 : 32, padding: compact ? "2px 8px" : "4px 16px", borderBottom: "1px solid #111", fontVariantNumeric: "tabular-nums" }}>
           {s.chronoOn && (
@@ -554,7 +619,7 @@ function ScopeView({ compact = false }) {
       {waveRows.length > 0 && (
         <div style={{ flex: waveRows.length, display: "flex", flexDirection: "column", minHeight: 0 }}>
           {waveRows.map((row) => (
-            <div key={row.key} style={{ flex: 1, display: "flex", borderBottom: "1px solid #111", minHeight: 0 }}>
+            <div key={row.key} style={{ flex: 1, display: "flex", borderBottom: "1px solid #16181d", borderLeft: `3px solid ${row.color}66`, minHeight: 0 }}>
               <div style={{ flex: 1, position: "relative", minWidth: 0 }}>
                 <span style={{ position: "absolute", top: 3, left: 8, color: row.color, fontSize: compact ? 10 : 13, letterSpacing: 1 }}>{row.label}</span>
                 <Trace color={row.color} sample={row.sample} pxPerUnit={row.px} baselineRatio={row.base} onBeat={row.beat} />
@@ -606,6 +671,17 @@ function RegiePanel() {
   const nibpBusy = s.nibpRequestedAt && Date.now() - s.nibpRequestedAt < NIBP_DURATION;
   const nibpBlocked = nibpBusy || !R.perfusing;
 
+  const [custom, setCustom] = useState(loadPresets());
+  const applyPreset = (p) => set(p.state);
+  const saveCurrent = () => {
+    const name = (typeof prompt === "function" ? prompt("Nom du scénario ?") : "") || "";
+    if (!name.trim()) return;
+    const next = [...custom.filter((c) => c.name !== name.trim()), { name: name.trim(), state: snapshot(store.getState()) }];
+    setCustom(next); savePresets(next);
+  };
+  const delPreset = (name) => { const next = custom.filter((c) => c.name !== name); setCustom(next); savePresets(next); };
+  const pBtn = { padding: "9px 8px", fontSize: 12, borderRadius: 6, cursor: "pointer", border: "1px solid #2a3f66", background: "#141c2b", color: "#cdd", textAlign: "left" };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", boxSizing: "border-box" }}>
       {/* Barre fixe : action PNI toujours accessible, hors zone scrollable */}
@@ -617,6 +693,24 @@ function RegiePanel() {
         </button>
       </div>
     <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 16, overflowY: "auto", flex: 1, boxSizing: "border-box" }}>
+      <div style={head}>Scénarios</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        {BUILTIN_PRESETS.map((p) => (
+          <button key={p.name} onClick={() => applyPreset(p)} style={pBtn}>{p.name}</button>
+        ))}
+      </div>
+      {custom.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+          {custom.map((p) => (
+            <div key={p.name} style={{ display: "flex", gap: 3 }}>
+              <button onClick={() => applyPreset(p)} style={{ ...pBtn, flex: 1 }}>{p.name}</button>
+              <button onClick={() => delPreset(p.name)} style={{ ...pBtn, padding: "9px 8px", color: "#c66", borderColor: "#633" }}>✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <button onClick={saveCurrent} style={{ ...pBtn, textAlign: "center", borderColor: "#3a5", color: "#8e8" }}>💾 Sauver l'état actuel</button>
+
       <div style={head}>Rythme</div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
         {Object.entries(RHYTHMS).map(([k, v]) => (
