@@ -609,7 +609,7 @@ function ScopeView({ compact = false }) {
     return (
       <div key={t.key} style={{ ...cardBase(t.color), alignItems: "center" }}>
         <span style={{ color: t.color, fontSize: fs(15), opacity: 0.9, alignSelf: "flex-start" }}>{t.label}</span>
-        <span style={{ ...blinkStyle(t.alarm, t.color), fontSize: fs(compact ? 34 : 66), textShadow: `0 0 12px ${t.color}55` }}>{t.value}</span>
+        <span style={{ ...blinkStyle(t.alarm, t.color), fontSize: fs(compact ? 44 : 92), textShadow: `0 0 14px ${t.color}66` }}>{t.value}</span>
         <span style={{ color: t.color, fontSize: fs(13), opacity: 0.6 }}>{t.unit}</span>
       </div>
     );
@@ -669,7 +669,7 @@ function ScopeView({ compact = false }) {
       <div style={{ flex: waveRows.length > 0 ? 1 : 2, display: "grid", gridTemplateColumns: "1fr 1fr", gap: compact ? 6 : 12, padding: compact ? 6 : 12, minHeight: 0 }}>
         {tiles.map(renderTile)}
       </div>
-      <div style={{ position: "absolute", bottom: 3, left: 0, right: 0, textAlign: "center", color: "#444", fontSize: compact ? 8 : 11, pointerEvents: "none" }}>
+      <div style={{ position: "absolute", bottom: 3, left: 0, right: 0, textAlign: "center", color: "#e8e8e8", fontSize: compact ? 9 : 13, fontWeight: 600, letterSpacing: 0.3, pointerEvents: "none", textShadow: "0 0 4px #000" }}>
         application créée par @un_homme_en_blancs
       </div>
       </div>
