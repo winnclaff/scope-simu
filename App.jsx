@@ -329,15 +329,48 @@ const audio = new MonitorAudio();
 
 const PX_PER_SEC = 60, ERASE_GAP = 10;
 
-function Trace({ color, sample, pxPerUnit, baselineRatio, lineWidth = 1.6, onBeat }) {
+/* Horloge cardiaque PARTAGÉE : toutes les courbes lisent la même phase, le même
+ * curseur et le même compteur de battements → pleth/PA calées sur le QRS.
+ * CARD est mis à jour par ScopeView à chaque rendu (rythme courant). */
+const CARD = { hrFn: () => 80, irregular: false };
+const WCLK = { x: 0, phase: 0, beat: 0, tSec: 0, cycle: 0.75, frameTime: 0, last: 0, points: [] };
+
+function cycleForBeat(hr, beat) {
+  const base = hr ? 60 / hr : 0.2;
+  return CARD.irregular ? base * (1 + 0.4 * seeded(beat)) : base;
+}
+// Avance l'horloge une seule fois par frame (le 1er canvas avance, les autres relisent).
+function advanceWaveClock(now, W) {
+  if (WCLK.frameTime === now) return WCLK.points;
+  WCLK.frameTime = now;
+  if (!WCLK.last) { WCLK.last = now; WCLK.points = []; return WCLK.points; }
+  let dt = (now - WCLK.last) / 1000; WCLK.last = now;
+  if (dt > 0.05) dt = 0.05;
+  WCLK.tSec += dt;
+  const step = 1 / PX_PER_SEC;
+  const cols = Math.floor(WCLK.x + PX_PER_SEC * dt) - Math.floor(WCLK.x);
+  WCLK.x += PX_PER_SEC * dt;
+  const pts = [];
+  for (let i = 0; i < cols; i++) {
+    let cx = Math.floor(WCLK.x) - (cols - 1 - i);
+    let wrap = false;
+    if (cx >= W) { WCLK.x -= W; cx -= W; wrap = true; }
+    WCLK.phase += step;
+    if (WCLK.phase >= WCLK.cycle) { WCLK.phase -= WCLK.cycle; WCLK.beat++; WCLK.cycle = cycleForBeat(CARD.hrFn(), WCLK.beat); }
+    pts.push({ cx, phase: WCLK.phase, tSec: WCLK.tSec + i * step, beat: WCLK.beat, wrap });
+  }
+  WCLK.points = pts;
+  return pts;
+}
+
+function Trace({ color, sample, pxPerUnit, baselineRatio, lineWidth = 1.6 }) {
   const canvasRef = useRef(null);
   const sampleRef = useRef(sample); sampleRef.current = sample;
-  const beatRef = useRef(onBeat); beatRef.current = onBeat;
 
   useEffect(() => {
     const canvas = canvasRef.current, ctx = canvas.getContext("2d");
     let raf, W = 0, H = 0, baseline = 0;
-    const r = { x: 0, prevX: 0, prevY: 0, phase: 0, tSec: 0, last: 0, beat: 0 };
+    const r = { prevX: 0, prevY: 0 };
     function resize() {
       const dpr = window.devicePixelRatio || 1, rect = canvas.getBoundingClientRect();
       W = Math.floor(rect.width); H = Math.floor(rect.height);
@@ -345,32 +378,22 @@ function Trace({ color, sample, pxPerUnit, baselineRatio, lineWidth = 1.6, onBea
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       baseline = H * baselineRatio;
       ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
-      r.x = 0; r.prevX = 0; r.prevY = baseline;
+      r.prevX = 0; r.prevY = baseline;
     }
     resize();
     const ro = new ResizeObserver(resize); ro.observe(canvas);
     function frame(now) {
-      if (!r.last) r.last = now;
-      let dt = (now - r.last) / 1000; r.last = now;
-      if (dt > 0.05) dt = 0.05;
-      r.tSec += dt;
-      const step = 1 / PX_PER_SEC;
-      const cols = Math.floor(r.x + PX_PER_SEC * dt) - Math.floor(r.x);
-      r.x += PX_PER_SEC * dt;
+      const pts = advanceWaveClock(now, W);
       ctx.lineWidth = lineWidth; ctx.strokeStyle = color; ctx.lineCap = "round";
-      for (let i = 0; i < cols; i++) {
-        let cx = Math.floor(r.x) - (cols - 1 - i);
-        if (cx < 0) continue;
-        if (cx >= W) { r.x -= W; cx -= W; r.prevX = cx; r.prevY = baseline; }
-        r.phase += step;
-        const val = sampleRef.current(r.phase, r.tSec + i * step, r.beat);
-        if (r.phase >= val.cycle) { r.phase -= val.cycle; r.beat++; if (beatRef.current) beatRef.current(); }
+      for (const p of pts) {
+        if (p.wrap) { r.prevX = p.cx; r.prevY = baseline; }
+        const val = sampleRef.current(p.phase, p.tSec, p.beat);
         let y = baseline - val.amp * pxPerUnit;
         y = Math.max(2, Math.min(H - 2, y));
         ctx.shadowBlur = 0;
-        ctx.fillStyle = "#000"; ctx.fillRect(cx, 0, 1, H); ctx.fillRect(cx + 1, 0, ERASE_GAP, H);
-        if (cx >= r.prevX) { ctx.shadowColor = color; ctx.shadowBlur = 6; ctx.beginPath(); ctx.moveTo(r.prevX, r.prevY); ctx.lineTo(cx, y); ctx.stroke(); }
-        r.prevX = cx; r.prevY = y;
+        ctx.fillStyle = "#000"; ctx.fillRect(p.cx, 0, 1, H); ctx.fillRect(p.cx + 1, 0, ERASE_GAP, H);
+        if (p.cx >= r.prevX) { ctx.shadowColor = color; ctx.shadowBlur = 6; ctx.beginPath(); ctx.moveTo(r.prevX, r.prevY); ctx.lineTo(p.cx, y); ctx.stroke(); }
+        r.prevX = p.cx; r.prevY = y;
       }
       raf = requestAnimationFrame(frame);
     }
@@ -419,6 +442,9 @@ function ScopeView({ compact = false }) {
     const resp = Math.sin(Date.now() / 1000 * (2 * Math.PI * st.rr / 60));
     return st.fc + (st.noiseOn ? resp * 1.4 : 0);
   };
+  // Alimente l'horloge cardiaque partagée avec le rythme courant.
+  CARD.hrFn = instHr;
+  CARD.irregular = !!R.irregular;
 
   // SpO2 réelle : décroît vers 0 (→ ---) en 2-3 s si non perfusant.
   const [spo2Live, setSpo2Live] = useState(98);
@@ -670,7 +696,7 @@ function ScopeView({ compact = false }) {
         {tiles.map(renderTile)}
       </div>
       <div style={{ position: "absolute", bottom: 3, left: 0, right: 0, textAlign: "center", color: "#e8e8e8", fontSize: compact ? 9 : 13, fontWeight: 600, letterSpacing: 0.3, pointerEvents: "none", textShadow: "0 0 4px #000" }}>
-        application créée par @un_homme_en_blancs
+        application créée par @un_homme_en_blanc
       </div>
       </div>
     </div>
@@ -825,9 +851,9 @@ function Home({ onEnter }) {
   const [err, setErr] = useState(null);
 
   const enter = async (role) => {
-    const c = code || "0000";
+    const c = code || "000000";
     setErr(null);
-    if (!SUPABASE_READY) { onEnter(role, c); return; } // fallback local si clés absentes
+    if (!SUPABASE_READY) { onEnter(role, c); return; }
     setBusy(true);
     try {
       await store.connect(SUPABASE_URL, SUPABASE_ANON, c, role === "pilote" ? "pilote" : "scope");
@@ -836,19 +862,30 @@ function Home({ onEnter }) {
       setErr("Connexion impossible : " + (e?.message || "vérifie ta connexion internet."));
     } finally { setBusy(false); }
   };
+  // Génère un code à 6 chiffres pour ouvrir une nouvelle session.
+  const genCode = () => setCode(String(Math.floor(100000 + Math.random() * 900000)));
 
   const bigBtn = (bg) => ({ padding: "20px 30px", fontSize: 19, borderRadius: 12, border: "none", cursor: busy ? "wait" : "pointer", background: bg, color: "#000", fontWeight: 700, minWidth: 210, opacity: busy ? 0.6 : 1 });
   const field = { padding: "11px 14px", fontSize: 14, borderRadius: 8, border: "1px solid #333", background: "#111", color: "#fff", boxSizing: "border-box" };
+  const step = (n, txt) => (
+    <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+      <span style={{ color: COLORS.ecg, fontWeight: 700, minWidth: 16 }}>{n}</span>
+      <span>{txt}</span>
+    </div>
+  );
 
   return (
-    <div style={{ background: "#0a0a0a", minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20, fontFamily: "'Helvetica Neue', Arial, sans-serif", color: "#eee", padding: 20 }}>
+    <div style={{ background: "#0a0a0a", minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 18, fontFamily: "'Helvetica Neue', Arial, sans-serif", color: "#eee", padding: 20 }}>
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: 30, fontWeight: 800, color: COLORS.ecg, letterSpacing: 2 }}>SCOPE SIMU</div>
         <div style={{ color: "#666", fontSize: 14, marginTop: 4 }}>Simulateur de monitorage — formation</div>
       </div>
 
-      <input value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="Code de session" inputMode="numeric"
-        style={{ ...field, fontSize: 22, letterSpacing: 6, textAlign: "center", width: 240 }} />
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "center" }}>
+        <input value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="Code (6 chiffres)" inputMode="numeric"
+          style={{ ...field, fontSize: 24, letterSpacing: 8, textAlign: "center", width: 300 }} />
+        <button onClick={genCode} style={{ ...field, cursor: "pointer", fontSize: 13, color: "#9ad", borderColor: "#9ad" }}>🎲 Générer</button>
+      </div>
 
       <div style={{ display: "flex", gap: 18, flexWrap: "wrap", justifyContent: "center" }}>
         <button style={bigBtn(COLORS.ecg)} disabled={busy} onClick={() => enter("pilote")}>RÉGIE (pilote)</button>
@@ -856,10 +893,17 @@ function Home({ onEnter }) {
       </div>
 
       {busy && <div style={{ color: "#4fc3f7", fontSize: 13 }}>Connexion…</div>}
-      {err && <div style={{ color: "#ff8", fontSize: 12, maxWidth: 420, textAlign: "center" }}>{err}</div>}
+      {err && <div style={{ color: "#ff8", fontSize: 12, maxWidth: 440, textAlign: "center" }}>{err}</div>}
 
-      <div style={{ color: "#555", fontSize: 12, maxWidth: 440, textAlign: "center", lineHeight: 1.5 }}>
-        Régie et scope rejoignent la même session avec le même code.
+      <div style={{ maxWidth: 460, fontSize: 13, color: "#aaa", lineHeight: 1.7, background: "#101216", border: "1px solid #23262e", borderRadius: 10, padding: "14px 18px", display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ color: "#eee", fontWeight: 700, marginBottom: 2 }}>Mode d'emploi</div>
+        {step("1", <>Sur la tablette formateur : génère ou saisis un code, puis <b style={{ color: COLORS.ecg }}>RÉGIE</b>.</>)}
+        {step("2", <>Sur la/les tablette(s) apprenant : saisis <b>le même code</b>, puis <b style={{ color: COLORS.pleth }}>SCOPE</b>.</>)}
+        {step("3", "La régie pilote tout en direct ; le scope affiche le moniteur.")}
+      </div>
+
+      <div style={{ color: "#e8e8e8", fontSize: 13, fontWeight: 600, textShadow: "0 0 4px #000" }}>
+        application créée par @un_homme_en_blanc
       </div>
     </div>
   );
@@ -883,7 +927,7 @@ function PiloteScreen({ code, onExit }) {
         <button onClick={onExit} style={{ background: "none", border: "1px solid #333", color: "#aaa", borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}>← Accueil</button>
         <span style={{ color: COLORS.ecg, fontWeight: 700 }}>RÉGIE</span>
         <ConnBadge />
-        <span style={{ marginLeft: "auto", color: "#444", fontSize: 11 }}>créée par @un_homme_en_blancs</span>
+        <span style={{ marginLeft: "auto", color: "#444", fontSize: 11 }}>créée par @un_homme_en_blanc</span>
         <span style={{ letterSpacing: 3 }}>Session {code}</span>
       </div>
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
@@ -919,8 +963,17 @@ function ScopeScreen({ code, onExit }) {
     document.addEventListener("webkitfullscreenchange", onChange);
     return () => { document.removeEventListener("fullscreenchange", onChange); document.removeEventListener("webkitfullscreenchange", onChange); };
   }, []);
+  // Bandeau perte de liaison : seulement après une connexion déjà établie.
+  const wasConn = useRef(false);
+  if (s.connected) wasConn.current = true;
+  const showLost = store.getMode() === "supabase" && !s.connected && wasConn.current;
   return (
     <div ref={rootRef} onPointerDown={enableSound} style={{ height: "100vh", background: "#000", position: "relative" }}>
+      {showLost && (
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, zIndex: 20, background: "#c0202a", color: "#fff", textAlign: "center", padding: "10px", fontWeight: 700, fontSize: 16, letterSpacing: 0.5 }}>
+          ⚠ PERTE DE LIAISON — reconnexion en cours…
+        </div>
+      )}
       <div style={{ position: "absolute", top: 4, left: 8, zIndex: 10, display: "flex", gap: 8, alignItems: "center" }}>
         {!isFull && <button onClick={onExit} style={{ background: "rgba(0,0,0,0.5)", border: "1px solid #222", color: "#555", borderRadius: 6, padding: "4px 8px", cursor: "pointer", fontSize: 12 }}>←</button>}
         {!s.soundOn && (
