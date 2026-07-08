@@ -908,6 +908,11 @@ function Home({ onEnter }) {
       <div style={{ color: "#e8e8e8", fontSize: 13, fontWeight: 600, textShadow: "0 0 4px #000" }}>
         application créée par @un_homme_en_blanc
       </div>
+
+      <a href="https://forms.gle/yTjxsvb2HYTc3ngH9" target="_blank" rel="noopener noreferrer"
+        style={{ color: "#9ad", fontSize: 13, textDecoration: "none", border: "1px solid #2c4a5a", borderRadius: 8, padding: "8px 14px" }}>
+        💬 Donner mon avis / signaler un bug
+      </a>
     </div>
   );
 }
@@ -930,7 +935,8 @@ function PiloteScreen({ code, onExit }) {
         <button onClick={onExit} style={{ background: "none", border: "1px solid #333", color: "#aaa", borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}>← Accueil</button>
         <span style={{ color: COLORS.ecg, fontWeight: 700 }}>RÉGIE</span>
         <ConnBadge />
-        <span style={{ marginLeft: "auto", color: "#444", fontSize: 11 }}>créée par @un_homme_en_blanc</span>
+        <a href="https://forms.gle/yTjxsvb2HYTc3ngH9" target="_blank" rel="noopener noreferrer" style={{ marginLeft: "auto", color: "#9ad", fontSize: 12, textDecoration: "none" }}>💬 Avis / bug</a>
+        <span style={{ color: "#444", fontSize: 11 }}>créée par @un_homme_en_blanc</span>
         <span style={{ letterSpacing: 3 }}>Session {code}</span>
       </div>
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
