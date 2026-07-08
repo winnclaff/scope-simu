@@ -247,12 +247,15 @@ function arterialAmplitude(phase, hr, resp) {
   const v = dia + (1 - dia) * sys - notch + dicrote;
   return Math.max(0, v * (1 + resp * 0.05)); // léger swing respiratoire
 }
+// Capnogramme réaliste (phases I→III + 0) sur un cycle respiratoire.
 function capnoAmplitude(tSec, rr) {
   const cycle = 60 / rr;
   const t = (tSec % cycle) / cycle;
-  if (t < 0.35) return Math.pow(t / 0.35, 0.5);
-  if (t < 0.55) return 1 + 0.06 * (t - 0.35);
-  return Math.max(0, 1 - (t - 0.55) / 0.12);
+  if (t < 0.08) return 0;                                   // Phase I : ligne de base (espace mort)
+  if (t < 0.18) return 0.9 * ((t - 0.08) / 0.10);           // Phase II : montée expiratoire raide → 0.9
+  if (t < 0.50) return 0.9 + 0.1 * ((t - 0.18) / 0.32);     // Phase III : plateau alvéolaire montant → 1.0 (EtCO2)
+  if (t < 0.57) return Math.max(0, 1 - (t - 0.50) / 0.07);  // Phase 0 : chute inspiratoire raide
+  return 0;                                                 // Inspiration : retour à la base
 }
 
 // Bruit déterministe (même valeur des deux côtés à partir d'une graine).
